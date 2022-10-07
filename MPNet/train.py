@@ -9,6 +9,13 @@ from model import MLP
 from torch.autograd import Variable 
 import math
 
+
+import datetime
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
+
+
 def to_var(x, volatile=False):
 	if torch.cuda.is_available():
 		x = x.cuda()
@@ -28,13 +35,16 @@ def get_input(i,data,targets,bs):
 
     
 def main(args):
-	# Create model directory
-	if not os.path.exists(args.model_path):
-		os.makedirs(args.model_path)
+	directory = './logs/' + datetime.datetime.now().strftime("%m%d_%H_%M/")
+	writer = SummaryWriter(directory)
     
     
 	# Build data loader
-	dataset,targets= load_dataset() 
+	dataset,targets= load_dataset(N=100, NP=4000, s=0, sp=0)
+	print('training dataset loaded', len(dataset)) 
+	test_dataset, test_target = load_dataset(N=100, NP=200, s=0, sp=4000)
+	test_dataset_unseen, test_target_unseen = load_dataset(N=10, NP=2000, s=100, sp=0)
+	print('dataset loaded') 
 	
 	# Build the models
 	mlp = MLP(args.input_size, args.output_size)
@@ -47,14 +57,11 @@ def main(args):
 	optimizer = torch.optim.Adagrad(mlp.parameters()) 
     
 	# Train the Models
-	total_loss=[]
-	print len(dataset)
-	print len(targets)
-	sm=100 # start saving models after 100 epochs
-	for epoch in range(args.num_epochs):
-		print "epoch" + str(epoch)
+	sm=10 # start saving models after 100 epochs
+	for epoch in tqdm(range(args.num_epochs), desc='epoch'):
+		# print("epoch" + str(epoch))
 		avg_loss=0
-		for i in range (0,len(dataset),args.batch_size):
+		for i in tqdm(range(0,len(dataset),args.batch_size), desc='batch', leave=False):
 			# Forward, Backward and Optimize
 			mlp.zero_grad()			
 			bi,bt= get_input(i,dataset,targets,args.batch_size)
@@ -62,20 +69,43 @@ def main(args):
 			bt=to_var(bt)
 			bo = mlp(bi)
 			loss = criterion(bo,bt)
-			avg_loss=avg_loss+loss.data[0]
+			avg_loss=avg_loss+loss.item()
 			loss.backward()
 			optimizer.step()
-		print "--average loss:"
-		print avg_loss/(len(dataset)/args.batch_size)
-		total_loss.append(avg_loss/(len(dataset)/args.batch_size))
+		# print("--average loss:")
+		# print(avg_loss/(len(dataset)/args.batch_size))
+		writer.add_scalar('MPNETLoss/train_loss', avg_loss/(len(dataset)/args.batch_size), epoch)
 		# Save the models
 		if epoch==sm:
-			model_path='mlp_100_4000_PReLU_ae_dd'+str(sm)+'.pkl'
-			torch.save(mlp.state_dict(),os.path.join(args.model_path,model_path))
+			model_path=directory + 'mpnet'+str(sm)+'.pkl'
+			torch.save(mlp.state_dict(), model_path)
 			sm=sm+50 # save model after every 50 epochs from 100 epoch ownwards
-	torch.save(total_loss,'total_loss.dat')
-	model_path='mlp_100_4000_PReLU_ae_dd_final.pkl'
-	torch.save(mlp.state_dict(),os.path.join(args.model_path,model_path))
+		
+		if epoch % 10 == 0:
+			test_on_val(test_dataset, test_target, args, mlp, writer, epoch, mode='')
+			test_on_val(test_dataset_unseen, test_target_unseen, args, mlp, writer, epoch, mode='_unseen')
+
+	model_path='mpnet_final.pkl'
+	torch.save(mlp.state_dict(), model_path)
+
+
+def test_on_val(test_dataset, test_target, args, mlp, writer, epoch, mode=''):
+	criterion = nn.MSELoss()
+	avg_loss=0
+	with torch.no_grad():
+		for i in range (0,len(test_dataset),args.batch_size):
+			# Forward, Backward and Optimize		
+			bi,bt= get_input(i,test_dataset,test_target,args.batch_size)
+			bi=to_var(bi)
+			bt=to_var(bt)
+			bo = mlp(bi)
+			loss = criterion(bo,bt)
+			avg_loss=avg_loss+loss.item()
+			writer.add_scalar('MPNETLoss/test_loss'+mode, avg_loss/(len(test_dataset)/args.batch_size), epoch)
+
+
+
+
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
 	parser.add_argument('--model_path', type=str, default='./models/',help='path for saving trained models')

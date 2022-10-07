@@ -4,7 +4,12 @@ import torch
 import torchvision
 from torch import nn
 from torch.autograd import Variable
-from data_loader import load_dataset
+from data_loader import load_dataset, AEDataset
+
+import datetime
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
 
 
 class Encoder(nn.Module):
@@ -38,13 +43,20 @@ def loss_function(W, x, recons_x, h):
 	return mse + contractive_loss
 
 
-def main(args):	
+def main(args):
+
+	directory = './logs/' + datetime.datetime.now().strftime("%m%d_%H_%M/")
+	writer = SummaryWriter(directory)
+	test_size = 5000
 	
 	if not os.path.exists(args.model_path):
 		os.makedirs(args.model_path)
 
 
 	obs = load_dataset()
+
+	dataloader = torch.utils.data.DataLoader(AEDataset('train'), batch_size=100,
+                                shuffle=False, num_workers=8)
 
 	encoder = Encoder()
 	decoder = Decoder()
@@ -55,53 +67,99 @@ def main(args):
 	
 	params = list(encoder.parameters())+list(decoder.parameters())
 	optimizer = torch.optim.Adagrad(params)
-	total_loss=[]
-	for epoch in range(args.num_epochs):
-		print "epoch" + str(epoch)
+	for epoch in tqdm(range(args.num_epochs)):
+		# print("epoch" + str(epoch))
 		avg_loss=0
-		for i in range(0, len(obs), args.batch_size):
+		# for i in range(0, (len(obs) - test_size), args.batch_size):
+
+		for i, data in enumerate(dataloader, 0):
+			x = data
+			inp = x
+			inp = torch.from_numpy(inp).type(torch.float32)
+			inp = Variable(inp).cuda()
 			decoder.zero_grad()
 			encoder.zero_grad()
-			if i+args.batch_size<len(obs):
-				inp = obs[i:i+args.batch_size]
-			else:
-				inp = obs[i:]
-			inp=torch.from_numpy(inp)
-			inp =Variable(inp).cuda()
+			# if i+args.batch_size<len(obs):
+			# 	inp = obs[i:i+args.batch_size]
+			# else:
+			# 	inp = obs[i:]
+			# inp=torch.from_numpy(inp)
+			# inp =Variable(inp).cuda()
 			# ===================forward=====================
 			h = encoder(inp)
 			output = decoder(h)
 			keys=encoder.state_dict().keys()
 			W=encoder.state_dict()['encoder.6.weight'] # regularize or contracting last layer of encoder. Print keys to displace the layers name. 
 			loss = loss_function(W,inp,output,h)
-			avg_loss=avg_loss+loss.data[0]
+			avg_loss=avg_loss+loss.item()
 			# ===================backward====================
 			loss.backward()
 			optimizer.step()
-		print "--average loss:"
-		print avg_loss/(len(obs)/args.batch_size)
-		total_loss.append(avg_loss/(len(obs)/args.batch_size))
+		# print("--average loss:")
+		# print(avg_loss/((len(obs) - test_size)/args.batch_size))
+		writer.add_scalar('VAELoss/train_loss', avg_loss/((len(obs) - test_size)/args.batch_size), epoch)
 
-	avg_loss=0
-	for i in range(len(obs)-5000, len(obs), args.batch_size):
-		inp = obs[i:i+args.batch_size]
-		inp=torch.from_numpy(inp)
-		inp =Variable(inp).cuda()
-		# ===================forward=====================
-		output = encoder(inp)
-		output = decoder(output)
-		loss = mse_loss(output,inp)
-		avg_loss=avg_loss+loss.data[0]
-		# ===================backward====================
-	print "--Validation average loss:"
-	print avg_loss/(5000/args.batch_size)
+		# if epoch%10 == 0:
+		# 	test_on_val(obs, args, encoder, decoder, writer, epoch)
+		# 	torch.save(encoder.state_dict(),os.path.join(directory,'cae_encoder.pkl'))
+		# 	torch.save(decoder.state_dict(),os.path.join(directory,'cae_decoder.pkl'))
 
 
-    
-	torch.save(encoder.state_dict(),os.path.join(args.model_path,'cae_encoder.pkl'))
-	torch.save(decoder.state_dict(),os.path.join(args.model_path,'cae_decoder.pkl'))
-	torch.save(total_loss,'total_loss.dat')
+def test_on_val(obs, args, encoder, decoder, writer, epoch):
+	with torch.no_grad():
+		encoder.eval()
+		decoder.eval()
+		avg_loss=0
+		for i in range(len(obs)-5000, len(obs), args.batch_size):
+				inp = obs[i:i+args.batch_size]
+				inp=torch.from_numpy(inp)
+				inp =Variable(inp).cuda()
+				# ===================forward=====================
+				output = encoder(inp)
+				output = decoder(output)
+				loss = mse_loss(output,inp)
+				avg_loss=avg_loss+loss.item()
+				# ===================backward====================
+		# print("--Validation average loss:")
+		# print(avg_loss/(5000/args.batch_size))
+		writer.add_scalar('VAELoss/val_loss', avg_loss/(5000/args.batch_size), epoch)
+		encoder.train()
+		decoder.train()
 
+
+
+def visualize():
+	obs = load_dataset()
+	encoder = Encoder()
+	decoder = Decoder()
+	path = 'logs/1006_15_50/cae_encoder.pkl'
+	path2 = 'logs/1006_15_50/cae_decoder.pkl'
+
+	path = 'logs/1006_18_08/cae_encoder.pkl'
+	path2 = 'logs/1006_18_08/cae_decoder.pkl'
+	encoder.load_state_dict(torch.load(path))
+	decoder.load_state_dict(torch.load(path2))
+
+	idx = 0
+	inp = obs[idx]
+	inp=torch.from_numpy(inp)
+	d_out = encoder(inp)
+	d_out = decoder(d_out)
+
+	## plot
+	print(inp.shape, d_out.shape)
+	d_out = d_out.cpu().data.numpy()
+	x_data = obs[idx]
+	print('level1',x_data.shape, d_out.shape)
+	
+	d_out = d_out.reshape(int(2800/2),2)
+	x_data = x_data.reshape(int(2800/2),2)
+	print('level2',x_data.shape, d_out.shape)
+	
+	plt.scatter(x_data[:,0], x_data[:,1], c ="blue", label="ground-truth")
+	plt.scatter(d_out[:,0], d_out[:,1], c ="red", label="reconstructed")
+	plt.legend()
+	plt.show()
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
@@ -121,5 +179,9 @@ if __name__ == '__main__':
 	parser.add_argument('--batch_size', type=int, default=100)
 	parser.add_argument('--learning_rate', type=float, default=0.001)
 	args = parser.parse_args()
+
+	args.num_epochs = 400
 	print(args)
 	main(args)
+
+	# visualize()
